@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>자격증 길잡이</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -282,7 +283,7 @@ footer.ft p{margin:0;padding-top:16px;border-top:1px solid var(--line)}
   <div class="top-in">
     <div class="brand-row"><div class="brand"><h1>자격증 길잡이</h1><p>전공과 관심사로 찾는 자격증·진로</p></div>
       <div class="acct"><button class="bell" data-act="notif" aria-label="알림"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg><span class="bell-n" id="bellN" hidden></span></button>
-      <span class="who" id="who" hidden></span></div></div>
+      <button class="btn sm" id="who" data-act="account" hidden></button></div></div>
     <nav class="tabs" aria-label="메뉴">
       <button data-view="home">이번 달 일정</button>
       <button data-view="explore">자격증 찾기</button>
@@ -731,43 +732,64 @@ async function flush(){
   if(pendingWrite){pendingWrite=false;flush();}
 }
 function persist(){ saveLocal(); flush(); }
-/* ---------- 계정 · 게시판 연결 ---------- */
-const ME={ready:false, uid:null, name:"", owner:false, db:null, user:null, canWrite:true};
-const B={loaded:false, err:"", postDocs:{}, cmtDocs:{}, likeDocs:{}};
+/* ---------- 계정 · 게시판 연결 (Supabase) ---------- */
+const SB_URL="https://zrcyqromcceesfbewrvi.supabase.co";
+const SB_KEY="sb_publishable_AvWITmQ9JY4k_DZAwMmGiA_TkRlSLDQ"; // 공개용(publishable) 키라서 브라우저 코드에 들어 있어도 되는 키예요
+let sb=null;
+try{
+  if(window.supabase && SB_URL.indexOf("__")!==0)
+    sb=window.supabase.createClient(SB_URL,SB_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
+}catch(e){ sb=null; }
+try{ if(localStorage.getItem("cg-ret")){ localStorage.removeItem("cg-ret"); S.view="board"; } }catch(e){}
+const ME={ready:false, uid:null, name:"", email:"", owner:false, canWrite:true};
+const B={loaded:false, err:"", posts:[], cmts:[], likes:[]};
 const names={};
-let boardTimer=null;
-function postsAll(){ const out=[]; for(const [a,d] of Object.entries(B.postDocs)) for(const p of (d.items||[])) if(p&&p.id) out.push({...p,author:a}); return out; }
-function cmtsAll(){ const out=[]; for(const [a,d] of Object.entries(B.cmtDocs)) for(const c of (d.items||[])) if(c&&c.id) out.push({...c,author:a}); return out; }
-function likesOf(pid){ let n=0; for(const d of Object.values(B.likeDocs)) if((d.ids||[]).includes(pid)) n++; return n; }
-function iLike(pid){ return !!(ME.uid && B.likeDocs[ME.uid] && (B.likeDocs[ME.uid].ids||[]).includes(pid)); }
-function nm(id){ if(id===ME.uid) return (ME.name||"나"); return (names[id]||"익명 사용자"); }
-let nameBusy=false;
-async function resolveNames(){
-  if(!ME.user||nameBusy) return;
-  const ids=[...new Set([...postsAll().map(p=>p.author),...cmtsAll().map(c=>c.author)])].filter(id=>!(id in names));
-  if(!ids.length) return;
-  nameBusy=true;
-  try{ const ps=await ME.user.profiles(ids); for(const id of ids) names[id]=(ps[id]&&ps[id].name)||""; }catch(e){ for(const id of ids) names[id]=""; }
-  nameBusy=false; render();
+function postsAll(){ return B.posts; }
+function cmtsAll(){ return B.cmts; }
+function likesOf(pid){ let n=0; for(const l of B.likes) if(l.post_id===pid) n++; return n; }
+function iLike(pid){ return !!ME.uid && B.likes.some(l=>l.post_id===pid&&l.user_id===ME.uid); }
+function nm(id){ if(id===ME.uid&&ME.name) return ME.name; return names[id]||"탈퇴한 사용자"; }
+function chk(r){ if(r.error) throw r.error; return r.data; }
+async function loadBoard(){
+  if(!sb){ B.err="nosb"; render(); return; }
+  try{
+    const [p,c,l,pr]=await Promise.all([
+      sb.from("posts").select("*").order("created_at",{ascending:false}).limit(500),
+      sb.from("comments").select("*").order("created_at",{ascending:true}).limit(1000),
+      sb.from("likes").select("post_id,user_id").limit(5000),
+      sb.from("profiles").select("id,display_name,is_admin")]);
+    const P=chk(p),C=chk(c),L=chk(l),R=chk(pr);
+    B.posts=P.map(x=>({id:x.id,author:x.author_id,cat:x.cat,certId:x.cert_id||"",title:x.title,body:x.body,at:Date.parse(x.created_at),edited:x.edited_at?Date.parse(x.edited_at):0}));
+    B.cmts=C.map(x=>({id:x.id,postId:x.post_id,author:x.author_id,body:x.body,at:Date.parse(x.created_at)}));
+    B.likes=L;
+    for(const x of R){ names[x.id]=x.display_name; if(x.id===ME.uid){ ME.name=x.display_name; ME.owner=!!x.is_admin; } }
+    B.loaded=true; B.err="";
+  }catch(e){ B.err="error"; }
+  render();
 }
-function snapToMap(snap){ const m={}; snap.docs.forEach(d=>{ if(d.exists) m[d.id]=d.data()||{}; }); return m; }
-ME.ready=true;
+async function applySession(session){
+  const u=session&&session.user;
+  const uid=u?u.id:null;
+  const changed=uid!==ME.uid||!ME.ready;
+  ME.uid=uid; ME.email=u?(u.email||""):"";
+  const md=(u&&u.user_metadata)||{};
+  ME.name=u?(md.full_name||md.name||(u.email||"").split("@")[0]):"";
+  if(!u) ME.owner=false;
+  ME.ready=true;
+  if(changed||!B.loaded) await loadBoard(); else render();
+}
+if(sb){
+  sb.auth.onAuthStateChange((ev,session)=>{ setTimeout(()=>applySession(session),0); });
+}else{ ME.ready=true; }
+window.addEventListener("focus",()=>{ if(sb&&S.view==="board"&&!S.ov) loadBoard(); });
 
-/* 내 문서에만 쓰기 (한 문서당 한 번에 하나씩) */
-const wq={};
-function writeDoc(path,data){
-  if(!ME.db) return Promise.reject({code:"not_granted"});
-  const prev=wq[path]||Promise.resolve();
-  const next=prev.catch(()=>{}).then(()=>ME.db.doc(path).set(data));
-  wq[path]=next; return next;
-}
 function writeFail(e){
-  const code=e&&e.code;
-  if(code==="invalid_argument"||code==="not_granted"){ ME.canWrite=false; toast("이 페이지에 글을 쓸 권한이 없어요. 공유한 사람에게 참여 권한을 요청하세요."); }
-  else if(code==="quota_exceeded") toast("저장 공간이 가득 찼어요. 오래된 글을 지운 뒤 다시 시도하세요.");
+  const code=e&&e.code, msg=String((e&&e.message)||"");
+  if(code==="42501"||/row-level security/i.test(msg)) toast("권한이 없어요. 로그인 상태를 확인해 주세요.");
   else toast("저장하지 못했어요. 잠시 후 다시 시도하세요.");
   render();
 }
+
 let toastT=null;
 function toast(msg){
   let el=document.getElementById("toast");
@@ -849,7 +871,8 @@ function render(){
 }
 function renderHeader(){
   const who=document.getElementById("who");
-  who.hidden=true;
+  who.hidden=!sb||!ME.ready;
+  if(!who.hidden){ who.textContent=ME.uid?(ME.name||"내 계정"):"로그인"; who.dataset.act=ME.uid?"account":"login"; who.style.maxWidth="140px"; who.style.overflow="hidden"; who.style.textOverflow="ellipsis"; who.style.whiteSpace="nowrap"; }
   const n=notifications().filter(x=>x.unread).length;
   const b=document.getElementById("bellN"); b.hidden=!n; b.textContent=n>9?"9+":n;
   document.querySelector(".bell").setAttribute("aria-label", n?`알림 ${n}개`:"알림");
@@ -1077,22 +1100,15 @@ function ago(ms){
 }
 function catTag(c){ return `<span class="cat cat-${esc(c)}">${esc(BCAT_NAME[c]||"자유")}</span>`; }
 function boardStatus(){
-  if(!ME.ready) return `<div class="panel"><p class="sub" style="margin:0">계정을 확인하고 있어요.</p></div>`;
-  if(B.err==="nodb"||(!ME.db&&ME.ready)) return `<div class="panel"><h3>게시판을 열 수 없어요</h3><p class="sub" style="margin:0">claude.ai에 로그인한 상태에서 이 페이지를 열면 게시판을 보고 글을 쓸 수 있어요.</p></div>`;
-  if(B.err&&B.err!=="slow") return `<div class="panel"><h3>게시판을 불러오지 못했어요</h3><p class="sub" style="margin:0">페이지를 새로 열어 다시 시도해 주세요.</p></div>`;
+  if(!sb) return `<div class="panel"><h3>게시판 준비 중이에요</h3><p class="sub" style="margin:0">아직 게시판 서버가 연결되지 않았어요.</p></div>`;
+  if(!ME.ready||(!B.loaded&&!B.err)) return `<div class="panel"><p class="sub" style="margin:0">게시판을 불러오고 있어요.</p></div>`;
+  if(B.err&&!B.loaded) return `<div class="panel"><h3>게시판을 불러오지 못했어요</h3><p class="sub">인터넷 연결을 확인하고 다시 시도해 주세요.</p><button class="btn sm" data-act="reload">다시 불러오기</button></div>`;
   return "";
 }
-const BOARD_URL="https://claude.ai/artifact/WpeNabJS4xiSKhaQjtZC5z";
 function boardHTML(){
-  return `<div class="result-head"><h2>게시판</h2></div>
-  <div class="panel"><h3>게시판은 claude.ai 버전에서 이용할 수 있어요</h3>
-  <p class="sub">질문, 꿀팁, 합격 후기를 나누는 게시판은 로그인과 공용 저장 공간이 필요해서 이 웹페이지에서는 열 수 없어요. 아래 버튼을 누르면 게시판이 있는 claude.ai 버전이 새 창으로 열려요. 보려면 claude.ai 로그인이 필요하고, 글쓰기는 참여 권한이 있어야 해요.</p>
-  <a class="btn primary" href="${BOARD_URL}" target="_blank" rel="noopener noreferrer">게시판 열기 (claude.ai)</a></div>`;
-}
-function boardHTMLOld(){
   const st=boardStatus(); if(st) return `<div class="result-head"><h2>게시판</h2></div>${st}`;
   const cm=cmtsAll();
-  let list=postsAll();
+  let list=[...postsAll()];
   if(S.bcat) list=list.filter(p=>p.cat===S.bcat);
   if(S.bcert) list=list.filter(p=>p.certId===S.bcert);
   const q=S.bq.trim().toLowerCase(); if(q) list=list.filter(p=>(p.title+" "+p.body+" "+(byId(p.certId)?byId(p.certId).name:"")).toLowerCase().includes(q));
@@ -1105,9 +1121,8 @@ function boardHTMLOld(){
     <span>${catTag(p.cat)}${c?` <span class="kind">${esc(c.name)}</span>`:""}</span>
     <div class="post-title">${esc(p.title)}</div>
     <div class="post-meta"><span>${esc(nm(p.author))}${p.author===ME.uid?' <span class="mine-tag">내 글</span>':""}</span><span>${ago(p.at)}</span><span>도움돼요 ${likesOf(p.id)}</span><span>댓글 ${cc(p.id)}</span></div></button></li>`;}).join("");
-  const loading=!B.loaded?`<p class="sub">${B.err==="slow"?"게시판 연결이 늦어지고 있어요. 보이는 내용이 최신이 아닐 수 있어요.":"게시글을 불러오는 중이에요."}</p>`:"";
-  return `<div class="result-head"><h2>게시판</h2><button class="btn primary sm" data-act="write" ${ME.uid&&ME.canWrite?"":"disabled"}>글쓰기</button></div>
-  ${!ME.uid?`<p class="notice">claude.ai에 로그인하면 글과 댓글을 쓸 수 있어요.</p>`:(!ME.canWrite?`<p class="notice">이 페이지에서는 글을 읽을 수만 있어요. 글을 쓰려면 공유한 사람에게 참여 권한을 요청하세요.</p>`:"")}
+  return `<div class="result-head"><h2>게시판</h2><button class="btn primary sm" data-act="write">글쓰기</button></div>
+  ${!ME.uid?`<p class="notice">누구나 글을 읽을 수 있어요. 글과 댓글을 쓰려면 <button class="linkbtn" data-act="login">로그인</button>하세요 (구글 또는 이메일).</p>`:""}
   <div class="board-top">
     <div class="search"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       <input id="bq" type="search" placeholder="게시글 검색" value="${esc(S.bq)}" aria-label="게시글 검색"></div>
@@ -1117,14 +1132,14 @@ function boardHTMLOld(){
       <label>정렬 <select data-b="bsort"><option value="new" ${S.bsort==="new"?"selected":""}>최신순</option><option value="like" ${S.bsort==="like"?"selected":""}>도움돼요순</option><option value="cmt" ${S.bsort==="cmt"?"selected":""}>댓글순</option></select></label>
     </div>
   </div>
-  ${loading}
-  ${list.length?`<ul class="post-list">${rows}</ul>`:(B.loaded?`<div class="panel"><h3>${postsAll().length?"조건에 맞는 글이 없어요":"아직 글이 없어요"}</h3><p class="sub" style="margin:0">${postsAll().length?"검색어나 필터를 바꿔 보세요.":"궁금한 점이나 공부 꿀팁을 첫 글로 남겨 보세요."}</p></div>`:"")}
-  <p class="small muted" style="margin-top:16px">게시판 글은 이 페이지를 함께 쓰는 사람들에게 보여요. 개인정보나 연락처는 올리지 마세요.</p>`;
+  ${list.length?`<ul class="post-list">${rows}</ul>`:`<div class="panel"><h3>${postsAll().length?"조건에 맞는 글이 없어요":"아직 글이 없어요"}</h3><p class="sub" style="margin:0">${postsAll().length?"검색어나 필터를 바꿔 보세요.":"궁금한 점이나 공부 꿀팁을 첫 글로 남겨 보세요."}</p></div>`}
+  <p class="small muted" style="margin-top:16px">게시판 글은 누구에게나 공개돼요. 개인정보나 연락처는 올리지 마세요.</p>`;
 }
-function findPost(author,id){ const d=B.postDocs[author]; return d&&(d.items||[]).find(p=>p.id===id); }
+function findPost(author,id){ return B.posts.find(p=>p.id===id); }
 function postHTML(author,id){
   const p=findPost(author,id);
   if(!p) return `<div class="sheet" role="dialog" aria-modal="true"><div class="sheet-head"><button class="btn sm ghost" data-act="close">‹ 닫기</button><h2>게시글</h2></div><div class="sheet-body"><p>삭제되었거나 찾을 수 없는 글이에요.</p></div></div>`;
+  author=p.author;
   const c=byId(p.certId), mine=author===ME.uid, canMod=mine||ME.owner;
   const cm=cmtsAll().filter(x=>x.postId===id).sort((a,b)=>a.at-b.at);
   return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="pt">
@@ -1135,12 +1150,12 @@ function postHTML(author,id){
       <h3 style="margin:0 0 6px;font-size:21px">${esc(p.title)}</h3>
       <p class="post-meta" style="margin:0 0 16px"><span>${esc(nm(author))}</span><span>${ago(p.at)}${p.edited?" (수정됨)":""}</span></p>
       <div class="post-body">${esc(p.body)}</div>
-      <button class="like" data-act="like" aria-pressed="${iLike(id)}" ${ME.uid&&ME.canWrite?"":"disabled"}>${iLike(id)?"♥":"♡"} 도움돼요 ${likesOf(id)}</button>
+      <button class="like" data-act="like" aria-pressed="${iLike(id)}">${iLike(id)?"♥":"♡"} 도움돼요 ${likesOf(id)}</button>
       <div class="sec" style="margin-top:24px"><h3>댓글 ${cm.length}</h3>
         ${cm.map(x=>`<div class="cmt"><div class="cmt-head"><span><strong>${esc(nm(x.author))}</strong>${x.author===author?' <span class="mine-tag">글쓴이</span>':""} · ${ago(x.at)}</span>
           ${(x.author===ME.uid||ME.owner)?`<button class="linkbtn small" data-delcmt="${esc(x.author)}|${esc(x.id)}">삭제</button>`:""}</div><p>${esc(x.body)}</p></div>`).join("")||`<p class="empty">첫 댓글로 답을 알려 주세요.</p>`}
-        ${ME.uid&&ME.canWrite?`<form id="cmtForm" style="margin-top:12px"><textarea class="ta" id="cmtBody" maxlength="1000" placeholder="댓글을 입력하세요" aria-label="댓글"></textarea>
-          <div class="row-actions" style="margin-top:8px"><button class="btn primary sm" type="submit">댓글 등록</button></div></form>`:`<p class="small muted">로그인하고 참여 권한이 있으면 댓글을 쓸 수 있어요.</p>`}
+        ${ME.uid?`<form id="cmtForm" style="margin-top:12px"><textarea class="ta" id="cmtBody" maxlength="1000" placeholder="댓글을 입력하세요" aria-label="댓글"></textarea>
+          <div class="row-actions" style="margin-top:8px"><button class="btn primary sm" type="submit">댓글 등록</button></div></form>`:`<p class="small muted" style="margin-top:12px"><button class="linkbtn" data-act="login">로그인</button>하면 댓글을 쓸 수 있어요.</p>`}
       </div></div></div>`;
 }
 function writeHTML(){
@@ -1161,34 +1176,67 @@ function writeHTML(){
     </form></div></div>`;
 }
 async function savePost(fd){
-  const mineDoc=B.postDocs[ME.uid]||{items:[]};
-  let items=[...(mineDoc.items||[])];
-  const now=Date.now();
-  if(S.ov.edit){ items=items.map(p=>p.id===S.ov.edit?{...p,cat:fd.cat,certId:fd.certId,title:fd.title,body:fd.body,edited:now}:p); }
-  else items.push({id:now.toString(36)+Math.random().toString(36).slice(2,6),cat:fd.cat,certId:fd.certId,title:fd.title,body:fd.body,at:now});
-  if(items.length>150) items=items.slice(-150);
-  const pid=S.ov.edit||items[items.length-1].id;
-  await writeDoc("posts/"+ME.uid,{items});
-  return pid;
+  if(S.ov.edit){
+    chk(await sb.from("posts").update({cat:fd.cat,cert_id:fd.certId||null,title:fd.title,body:fd.body,edited_at:new Date().toISOString()}).eq("id",S.ov.edit));
+    await loadBoard(); return S.ov.edit;
+  }
+  const row=chk(await sb.from("posts").insert({cat:fd.cat,cert_id:fd.certId||null,title:fd.title,body:fd.body}).select("id").single());
+  await loadBoard(); return row.id;
 }
-async function delPost(author,id){
-  const d=B.postDocs[author]; if(!d) return;
-  await writeDoc("posts/"+author,{items:(d.items||[]).filter(p=>p.id!==id)});
-}
-async function addCmt(postId,body){
-  const d=B.cmtDocs[ME.uid]||{items:[]};
-  let items=[...(d.items||[]),{id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),postId,body,at:Date.now()}];
-  if(items.length>400) items=items.slice(-400);
-  await writeDoc("comments/"+ME.uid,{items});
-}
-async function delCmt(author,id){
-  const d=B.cmtDocs[author]; if(!d) return;
-  await writeDoc("comments/"+author,{items:(d.items||[]).filter(c=>c.id!==id)});
-}
+async function delPost(author,id){ chk(await sb.from("posts").delete().eq("id",id)); await loadBoard(); }
+async function addCmt(postId,body){ chk(await sb.from("comments").insert({post_id:postId,body})); await loadBoard(); }
+async function delCmt(author,id){ chk(await sb.from("comments").delete().eq("id",id)); await loadBoard(); }
 async function toggleLike(pid){
-  const d=B.likeDocs[ME.uid]||{ids:[]}; const ids=new Set(d.ids||[]);
-  ids.has(pid)?ids.delete(pid):ids.add(pid);
-  await writeDoc("likes/"+ME.uid,{ids:[...ids].slice(-1000)});
+  if(iLike(pid)){
+    B.likes=B.likes.filter(l=>!(l.post_id===pid&&l.user_id===ME.uid)); render();
+    chk(await sb.from("likes").delete().eq("post_id",pid).eq("user_id",ME.uid));
+  }else{
+    B.likes=[...B.likes,{post_id:pid,user_id:ME.uid}]; render();
+    chk(await sb.from("likes").insert({post_id:pid}));
+  }
+}
+
+/* ---------- 로그인 · 계정 ---------- */
+function loginHTML(){
+  const up=S.ov.mode==="up";
+  return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="lt" style="max-width:440px">
+    <div class="sheet-head"><button class="btn sm ghost" data-act="close">‹ 닫기</button><h2 id="lt">${up?"회원가입":"로그인"}</h2></div>
+    <div class="sheet-body">
+      <p class="small muted" style="margin:0 0 14px">로그인하면 게시판 글쓰기·댓글·도움돼요를 쓸 수 있어요. 찜과 일정은 로그인 없이도 이 기기에 저장돼요.</p>
+      <button class="btn" style="width:100%" data-act="google">구글 계정으로 계속하기</button>
+      <p class="small muted" style="text-align:center;margin:14px 0">또는 이메일로</p>
+      <form class="f" id="authForm" data-mode="${up?"up":"in"}" novalidate>
+        ${up?`<label>이름 <span class="hint">게시판에 보이는 이름 (20자 이내)</span><input name="name" maxlength="20" autocomplete="nickname"></label>`:""}
+        <label>이메일<input name="email" type="email" autocomplete="email" inputmode="email"></label>
+        <label>비밀번호 <span class="hint">8자 이상</span><input name="password" type="password" autocomplete="${up?"new-password":"current-password"}"></label>
+        <p class="err" id="authErr" role="alert"></p>
+        <button class="btn primary" type="submit">${up?"가입하기":"로그인"}</button>
+      </form>
+      <p class="small" style="margin:14px 0 0">${up?`이미 계정이 있나요? <button class="linkbtn" data-act="authmode" data-m="in">로그인</button>`:`처음이신가요? <button class="linkbtn" data-act="authmode" data-m="up">이메일로 회원가입</button>`}</p>
+    </div></div>`;
+}
+function accountHTML(){
+  return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="ant" style="max-width:440px">
+    <div class="sheet-head"><button class="btn sm ghost" data-act="close">‹ 닫기</button><h2 id="ant">내 계정</h2></div>
+    <div class="sheet-body">
+      <p style="margin:0 0 4px"><strong>${esc(ME.name)}</strong>${ME.owner?" (관리자)":""}</p>
+      <p class="small muted" style="margin:0 0 16px">${esc(ME.email)}</p>
+      <form class="f" id="nameForm" novalidate>
+        <label>게시판에 보이는 이름<input name="name" maxlength="20" value="${esc(ME.name)}"></label>
+        <p class="err" id="nameErr" role="alert"></p>
+        <div class="row-actions"><button class="btn primary sm" type="submit">이름 저장</button><button class="btn sm" type="button" data-act="logout">로그아웃</button></div>
+      </form>
+    </div></div>`;
+}
+function authMsg(m){
+  m=String(m||"");
+  if(/invalid login/i.test(m)) return "이메일 또는 비밀번호가 맞지 않아요.";
+  if(/not confirmed/i.test(m)) return "이메일 인증이 아직 안 됐어요. 받은 편지함의 확인 메일을 눌러 주세요.";
+  if(/already registered|already been registered/i.test(m)) return "이미 가입된 이메일이에요. 로그인해 주세요.";
+  if(/rate limit|too many|security purposes/i.test(m)) return "요청이 너무 많아요. 잠시 뒤에 다시 시도해 주세요.";
+  if(/password/i.test(m)) return "비밀번호는 8자 이상으로 입력해 주세요.";
+  if(/email/i.test(m)) return "이메일 주소를 확인해 주세요.";
+  return "처리하지 못했어요. 잠시 후 다시 시도해 주세요.";
 }
 
 /* =========================
@@ -1226,6 +1274,7 @@ function notifHTML(list){
       ${items||`<p class="empty">새 알림이 없어요. 자격증을 찜해 두면 접수 시작·마감, 시험일이 다가올 때 여기에 알려 드려요.</p>`}
       <div class="sec" style="margin-top:22px"><h3>알림 설정</h3>
         <label class="toggle"><input type="checkbox" data-n="sched" ${D.notif.sched?"checked":""}> 찜한 자격증의 접수·시험·발표 일정 알림</label>
+        <label class="toggle"><input type="checkbox" data-n="comment" ${D.notif.comment?"checked":""} ${ME.uid?"":"disabled"}> 내 글에 달린 댓글 알림 ${ME.uid?"":"(로그인하면 쓸 수 있어요)"}</label>
         <p class="small muted" style="margin-top:8px">알림은 이 페이지를 열었을 때 종 모양 아이콘과 이 목록으로 보여 드려요. 휴대폰 푸시 알림은 지원하지 않아요.</p></div>
     </div></div>`;
 }
@@ -1270,6 +1319,7 @@ function detailHTML(c){
       <div class="sec"><h3>함께 따면 좋은 자격증</h3><div class="minichips">${c.related.map(id=>`<button class="minichip" data-open="${id}">${esc(byId(id).name)}</button>`).join("")}</div></div>
       <div class="sec"><h3>공부 팁</h3><p>${esc(c.tip)}</p></div>
       ${mine.length?`<div class="sec"><h3>시험 일정</h3><ul class="plain">${mine.map(s=>{const es=pd(s.examStart),ee=pd(s.examEnd);return `<li>${schedLine(s)}${s.official?"":" (직접 입력)"}: 접수 ${fmt(pd(s.regStart))} ~ ${fmt(pd(s.regEnd))}${es?", 시험 "+fmt(es)+(ee&&ee.getTime()!==es.getTime()?" ~ "+fmt(ee):""):""}${s.result?", 발표 "+fmt(pd(s.result)):""}</li>`;}).join("")}</ul>${mine.some(s=>s.official)?`<p class="small muted" style="margin-top:6px">출처: ${[...new Set(mine.filter(s=>s.official).map(s=>s.note.split(" · ")[0]))].map(esc).join(", ")}</p>`:""}</div>`:""}
+      <div class="sec"><h3>이 자격증 이야기</h3><p>게시판에 이 자격증 관련 글이 ${postsAll().filter(p=>p.certId===c.id).length}개 있어요. <button class="linkbtn" data-boardcert="${c.id}">게시판에서 보기</button></p></div>
       <div class="sec apply"><strong>시험 접수·신청하기</strong>
         <span class="small muted">${esc(o.name)} 공식 사이트로 이동해요 (새 창)</span>
         <a class="btn primary" href="${o.url}" target="_blank" rel="noopener noreferrer">공식 사이트 열기</a>
@@ -1329,7 +1379,7 @@ function renderOverlay(){
   if(!S.ov){ if(el.innerHTML){el.innerHTML=""; el.dataset.key=""; document.body.style.overflow=""; if(lastFocus&&lastFocus.isConnected) lastFocus.focus();} return; }
   const key=JSON.stringify(S.ov);
   const same = el.dataset.key===key && el.innerHTML;
-  if(same && (S.ov.t==="add"||S.ov.t==="write")) return;
+  if(same && (S.ov.t==="add"||S.ov.t==="write"||S.ov.t==="login")) return;
   let keep=null, scr=0;
   if(same){ const sh=el.querySelector(".sheet"); scr=sh?sh.scrollTop:0; const ta=document.getElementById("cmtBody"); if(ta) keep={v:ta.value,f:document.activeElement===ta}; }
   let html="";
@@ -1339,6 +1389,8 @@ function renderOverlay(){
   else if(S.ov.t==="post") html=postHTML(S.ov.a,S.ov.id);
   else if(S.ov.t==="write") html=writeHTML();
   else if(S.ov.t==="notif") html=notifHTML(notifications());
+  else if(S.ov.t==="login") html=loginHTML();
+  else if(S.ov.t==="account") html=accountHTML();
   const wasOpen=!!el.innerHTML;
   el.innerHTML=`<div class="ov" data-act="backdrop">${html}</div>`;
   el.dataset.key=key;
@@ -1384,10 +1436,20 @@ document.addEventListener("click",ev=>{
   if(act==="cmpclear"){S.cmp=[];render();}
   if(act==="cmpopen"){lastFocus=document.activeElement;S.ov={t:"cmp"};renderOverlay();}
   if(act==="notif"){ lastFocus=document.activeElement; S.ov={t:"notif"}; renderOverlay(); D.lastSeen=Date.now(); persist(); renderHeader(); return; }
-  if(act==="write"){ lastFocus=document.activeElement; S.ov={t:"write",cert:S.bcert||""}; renderOverlay(); return; }
+  if(act==="login"){ if(!S.ov) lastFocus=document.activeElement; S.ov={t:"login",mode:"in"}; renderOverlay(); return; }
+  if(act==="account"){ if(!S.ov) lastFocus=document.activeElement; S.ov={t:"account"}; renderOverlay(); return; }
+  if(act==="authmode"){ S.ov={t:"login",mode:a.dataset.m}; renderOverlay(); return; }
+  if(act==="reload"){ B.err=""; render(); loadBoard(); return; }
+  if(act==="google"){
+    try{ localStorage.setItem("cg-ret","1"); }catch(e){}
+    sb.auth.signInWithOAuth({provider:"google",options:{redirectTo:location.origin+location.pathname}}).then(r=>{ const e=document.getElementById("authErr"); if(r.error&&e) e.textContent="구글 로그인을 시작하지 못했어요. 잠시 후 다시 시도해 주세요."; });
+    return;
+  }
+  if(act==="logout"){ sb.auth.signOut().then(()=>{ S.ov=null; render(); toast("로그아웃했어요."); }); return; }
+  if(act==="write"){ if(!ME.uid){ lastFocus=document.activeElement; S.ov={t:"login",mode:"in"}; renderOverlay(); return; } lastFocus=document.activeElement; S.ov={t:"write",cert:S.bcert||""}; renderOverlay(); return; }
   if(act==="editpost"){ S.ov={t:"write",edit:S.ov.id}; renderOverlay(); return; }
   if(act==="delpost"){ const {a,id}=S.ov; if(confirm("이 글을 삭제할까요? 삭제하면 되돌릴 수 없어요.")){ delPost(a,id).then(()=>{S.ov=null;render();toast("글을 삭제했어요.");}).catch(writeFail);} return; }
-  if(act==="like"){ toggleLike(S.ov.id).catch(writeFail); return; }
+  if(act==="like"){ if(!ME.uid){ S.ov={t:"login",mode:"in"}; renderOverlay(); return; } toggleLike(S.ov.id).catch(e=>{ loadBoard(); writeFail(e); }); return; }
   if(act==="reset"){S.q="";S.cat=null;S.f={lv:"",kind:"",free:false,sb:""};render();}
 });
 document.addEventListener("change",ev=>{
@@ -1419,6 +1481,35 @@ document.addEventListener("input",ev=>{
   }
 });
 document.addEventListener("submit",ev=>{
+  if(ev.target.id==="authForm"){
+    ev.preventDefault();
+    const f=ev.target, up=f.dataset.mode==="up", err=document.getElementById("authErr");
+    const email=f.email.value.trim(), password=f.password.value, name=up?f.name.value.trim():"";
+    err.style.color=""; err.textContent="";
+    if(!email){ err.textContent="이메일을 입력하세요."; return; }
+    if(password.length<8){ err.textContent="비밀번호는 8자 이상으로 입력해 주세요."; return; }
+    if(up&&!name){ err.textContent="게시판에 보일 이름을 입력하세요."; return; }
+    const btn=f.querySelector("[type=submit]"); btn.disabled=true;
+    const p=up?sb.auth.signUp({email,password,options:{data:{full_name:name},emailRedirectTo:location.origin+location.pathname}})
+              :sb.auth.signInWithPassword({email,password});
+    p.then(r=>{
+      btn.disabled=false;
+      if(r.error){ err.textContent=authMsg(r.error.message); return; }
+      if(up&&!r.data.session){ err.style.color="var(--ok)"; err.textContent="확인 메일을 보냈어요. 메일의 링크를 누른 뒤 로그인해 주세요. (스팸함도 확인해 보세요)"; return; }
+      S.ov=null; render(); toast("로그인했어요.");
+    }).catch(()=>{ btn.disabled=false; err.textContent=authMsg(""); });
+    return;
+  }
+  if(ev.target.id==="nameForm"){
+    ev.preventDefault();
+    const v=ev.target.name.value.trim().slice(0,20), err=document.getElementById("nameErr");
+    if(!v){ err.textContent="이름을 입력하세요."; return; }
+    sb.from("profiles").update({display_name:v}).eq("id",ME.uid).then(r=>{
+      if(r.error){ err.textContent="저장하지 못했어요."; return; }
+      ME.name=v; names[ME.uid]=v; S.ov=null; render(); toast("이름을 바꿨어요.");
+    });
+    return;
+  }
   if(ev.target.id==="postForm"){
     ev.preventDefault();
     const fd=Object.fromEntries(new FormData(ev.target).entries()); for(const k in fd) fd[k]=String(fd[k]).trim();
